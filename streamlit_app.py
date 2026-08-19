@@ -98,7 +98,14 @@ if submitted:
                 rows = []
 
         if rows:
-            st.session_state.result_df = pd.DataFrame(rows)
+            df = pd.DataFrame(rows)
+            # URL을 채널명 바로 뒤로 이동
+            column_order = [
+                "검색키워드", "제목", "채널명", "URL", "조회수", "구독자수",
+                "영상점수", "조회수/구독자배수", "참여율(%)", "영상길이(초)", "업로드일",
+            ]
+            df = df[[c for c in column_order if c in df.columns]]
+            st.session_state.result_df = df
             st.session_state.result_keywords = keywords
         else:
             st.session_state.result_df = None
@@ -115,10 +122,15 @@ if st.session_state.result_df is not None:
     col2.metric("영상점수 5점 이상", f"{hot_count}건")
     col3.metric("검색 키워드", f"{len(st.session_state.result_keywords)}개")
 
+    # 행 개수에 맞춰 표 높이를 자동으로 늘려서, 스크롤 없이 최대한 한번에 보이게 함
+    # (행이 아주 많으면 800px에서 멈추고 그 이후는 스크롤)
+    table_height = min(38 + 35 * len(df), 800)
+
     st.dataframe(
         df,
         use_container_width=True,
         hide_index=True,
+        height=table_height,
         column_config={
             "URL": st.column_config.LinkColumn("링크", display_text="영상 보기"),
             "영상점수": st.column_config.NumberColumn("영상점수", format="%.2f"),
