@@ -26,6 +26,7 @@ import pandas as pd
 import streamlit as st
 
 from youtube_item_finder import find_items, find_yesterday_top_shopping, DEFAULT_SHOPPING_KEYWORDS
+from video_analyzer import get_transcript, analyze_video, extract_video_id
 
 st.set_page_config(page_title="신박살림 아이템 발굴기", page_icon="🔎", layout="wide")
 
@@ -36,75 +37,140 @@ COLUMN_ORDER = [
 
 CARD_CSS = """
 <style>
-.vcard-grid { display:grid; grid-template-columns:repeat(auto-fill, minmax(170px, 1fr)); gap:16px; margin-top:8px; }
-.vcard { background:#1a1a2e; border-radius:10px; overflow:hidden; }
-.vcard .thumb-wrap { position:relative; width:100%; aspect-ratio:9/16; background:#000; overflow:hidden; }
-.vcard .thumb-wrap img { width:100%; height:100%; object-fit:cover; display:block; }
-.vcard .rank-badge { position:absolute; top:8px; left:8px; background:#f5a623; color:#1a1a2e;
-  font-weight:700; font-size:13px; width:24px; height:24px; border-radius:50%;
-  display:flex; align-items:center; justify-content:center; }
-.vcard .dur-badge { position:absolute; bottom:6px; right:6px; background:rgba(0,0,0,0.75);
-  color:#fff; font-size:11px; padding:2px 6px; border-radius:4px; }
-.vcard .views-badge { position:absolute; bottom:6px; left:6px; background:rgba(0,0,0,0.75);
-  color:#fff; font-size:11px; padding:2px 6px; border-radius:4px; }
-.vcard .body { padding:8px 10px 12px; }
-.vcard .title { font-size:12.5px; font-weight:600; line-height:1.3; height:2.6em; overflow:hidden;
-  display:-webkit-box; -webkit-line-clamp:2; -webkit-box-orient:vertical; margin-bottom:6px; color:#fff; }
-.vcard .channel { font-size:11px; color:#b8b8c8; margin-bottom:8px; }
-.vcard .watch-btn { display:block; text-align:center; background:#3b6fe0; color:#fff !important;
-  text-decoration:none; font-size:12px; font-weight:600; padding:6px 0; border-radius:6px; }
-.vcard .watch-btn:hover { background:#2f5bc4; }
+.vcard-thumb { position:relative; width:100%; aspect-ratio:9/16; background:#000;
+  overflow:hidden; border-radius:10px; }
+.vcard-thumb img { width:100%; height:100%; object-fit:cover; display:block; }
+.vcard-meta { font-size:12px; color:#8a8a99; margin:4px 0 2px; }
+.vcard-title { font-size:13px; font-weight:600; line-height:1.35; margin-bottom:4px;
+  display:-webkit-box; -webkit-line-clamp:2; -webkit-box-orient:vertical; overflow:hidden; min-height:2.7em; }
+.vcard-channel { font-size:11.5px; color:#8a8a99; margin-bottom:6px; }
 </style>
 """
 
 
-def render_card_grid(df):
-    """썸네일 그리드(카드형) 뷰로 결과를 보여준다."""
+def render_analysis(result):
+    """AI 영상 분석 결과(dict)를 보기 좋게 표시."""
+    st.markdown(f"**🎯 제품정보**\n\n{result.get('제품정보', '-')}")
+
+    keywords = result.get("추천검색어") or []
+    if keywords:
+        st.markdown("**🔑 추천 검색어**")
+        st.write(" · ".join(f"`{k}`" for k in keywords))
+
+    hook = result.get("후킹방식") or {}
+    if hook:
+        st.markdown("**🪝 후킹 방식**")
+        st.markdown(f"- 시작 멘트: _{hook.get('시작멘트', '-')}_")
+        st.markdown(f"- 방식: {hook.get('방식', '-')}")
+
+    st.markdown(f"**🚀 떡상요인**\n\n{result.get('떡상요인', '-')}")
+
+    flow = result.get("영상흐름") or []
+    if flow:
+        st.markdown("**🎬 영상 흐름**")
+        for seg in flow:
+            st.markdown(f"- **{seg.get('구간', '-')}**: {seg.get('설명', '-')}")
+
+    st.markdown(f"**📣 CTA**\n\n{result.get('cta', '-')}")
+
+
+def run_analysis(video_id, title, channel, gemini_key):
+    """영상 1개를 분석해서 세션 상태에 저장 (버튼 클릭 시 호출)."""
+    if "analysis_results" not in st.session_state:
+        st.session_state.analysis_results = {}
+
+    if not gemini_key:
+        st.session_state.analysis_results[video_id] = {
+            "error": "Gemini API 키가 없습니다. 사이드바에서 입력해주세요."
+        }
+        return
+
+    try:
+        segments = get_transcript(video_id)
+        result = analyze_video(
+            gemini_api_key=gemini_key,
+            title=title,
+            channel=channel,
+            transcript_segments=segments,
+        )
+        result["_had_transcript"] = segments is not None
+        st.session_state.analysis_results[video_id] = result
+    except Exception as e:
+        st.session_state.analysis_results[video_id] = {"error": f"분석 중 오류: {e}"}
+
+
+def render_card_grid(df, gemini_key, cols_per_row=4):
+    """썸네일 카드 그리드 뷰 + 카드별 'AI 분석' 버튼."""
     st.markdown(CARD_CSS, unsafe_allow_html=True)
-    cards = ['<div class="vcard-grid">']
-    for i, row in enumerate(df.to_dict("records"), start=1):
-        thumb = html.escape(str(row.get("썸네일") or ""), quote=True)
-        title = html.escape(str(row.get("제목", "")))
-        channel = html.escape(str(row.get("채널명", "")))
-        url = html.escape(str(row.get("URL", "")), quote=True)
 
-        try:
-            views_label = f"{int(row.get('조회수', 0)):,}회"
-        except (TypeError, ValueError):
-            views_label = str(row.get("조회수", "-"))
+    if "analysis_results" not in st.session_state:
+        st.session_state.analysis_results = {}
 
-        subs = row.get("구독자수", "-")
-        try:
-            subs_label = f"구독자 {int(subs):,}"
-        except (TypeError, ValueError):
-            subs_label = "구독자 비공개"
+    records = df.to_dict("records")
+    for start in range(0, len(records), cols_per_row):
+        chunk = records[start:start + cols_per_row]
+        cols = st.columns(cols_per_row)
+        for rank_offset, (col, row) in enumerate(zip(cols, chunk)):
+            rank = start + rank_offset + 1
+            with col:
+                thumb = html.escape(str(row.get("썸네일") or ""), quote=True)
+                title = str(row.get("제목", ""))
+                channel = str(row.get("채널명", ""))
+                url = str(row.get("URL", ""))
+                video_id = extract_video_id(url)
 
-        try:
-            dur = int(row.get("영상길이(초)", 0))
-            dur_label = f"{dur // 60}:{dur % 60:02d}"
-        except (TypeError, ValueError):
-            dur_label = "-"
+                try:
+                    views_label = f"{int(row.get('조회수', 0)):,}회"
+                except (TypeError, ValueError):
+                    views_label = str(row.get("조회수", "-"))
 
-        cards.append(f"""
-        <div class="vcard">
-          <div class="thumb-wrap">
-            <img src="{thumb}" loading="lazy" alt="thumbnail" />
-            <span class="rank-badge">{i}</span>
-            <span class="views-badge">{views_label}</span>
-            <span class="dur-badge">{dur_label}</span>
-          </div>
-          <div class="body">
-            <div class="title">{title}</div>
-            <div class="channel">{channel} · {subs_label}</div>
-            <a class="watch-btn" href="{url}" target="_blank">▶ 영상 보기</a>
-          </div>
-        </div>""")
-    cards.append("</div>")
-    st.markdown("".join(cards), unsafe_allow_html=True)
+                try:
+                    dur = int(row.get("영상길이(초)", 0))
+                    dur_label = f"{dur // 60}:{dur % 60:02d}"
+                except (TypeError, ValueError):
+                    dur_label = "-"
+
+                subs = row.get("구독자수", "-")
+                try:
+                    subs_label = f"구독자 {int(subs):,}"
+                except (TypeError, ValueError):
+                    subs_label = "구독자 비공개"
+
+                st.markdown(
+                    f'<div class="vcard-thumb"><img src="{thumb}" loading="lazy" alt="thumbnail"/></div>',
+                    unsafe_allow_html=True,
+                )
+                st.markdown(
+                    f'<div class="vcard-meta">#{rank} · {views_label} · {dur_label}</div>'
+                    f'<div class="vcard-title">{html.escape(title)}</div>'
+                    f'<div class="vcard-channel">{html.escape(channel)} · {subs_label}</div>',
+                    unsafe_allow_html=True,
+                )
+
+                btn_col1, btn_col2 = st.columns(2)
+                btn_col1.link_button("▶ 보기", url, use_container_width=True)
+                analyze_clicked = btn_col2.button(
+                    "🔍 분석", key=f"analyze_{video_id}_{rank}", use_container_width=True
+                )
+                if analyze_clicked:
+                    with st.spinner("분석 중..."):
+                        run_analysis(video_id, title, channel, gemini_key)
+
+                if video_id in st.session_state.analysis_results:
+                    result = st.session_state.analysis_results[video_id]
+                    with st.expander("📊 AI 영상 분석", expanded=True):
+                        if "error" in result:
+                            st.error(result["error"])
+                        else:
+                            if not result.get("_had_transcript", True):
+                                st.caption("⚠️ 이 영상은 자막을 가져오지 못해 제목만으로 추정한 분석이에요.")
+                            render_analysis(result)
+
+                st.divider()
 
 
 def get_api_key():
-    """API 키를 우선순위대로 찾는다: Streamlit Secrets -> 환경변수 -> 사이드바 직접 입력."""
+    """유튜브 API 키를 우선순위대로 찾는다: Streamlit Secrets -> 환경변수 -> 사이드바 직접 입력."""
     try:
         if "YOUTUBE_API_KEY" in st.secrets:
             return st.secrets["YOUTUBE_API_KEY"], "secrets"
@@ -118,11 +184,26 @@ def get_api_key():
     return None, "manual"
 
 
+def get_gemini_key():
+    """Gemini API 키를 우선순위대로 찾는다 (AI 영상 분석 기능용, 선택사항)."""
+    try:
+        if "GEMINI_API_KEY" in st.secrets:
+            return st.secrets["GEMINI_API_KEY"], "secrets"
+    except Exception:
+        pass
+
+    env_key = os.environ.get("GEMINI_API_KEY")
+    if env_key:
+        return env_key, "env"
+
+    return None, "manual"
+
+
 def reorder(df):
     return df[[c for c in COLUMN_ORDER if c in df.columns]]
 
 
-def render_results(df, keyword_count, sort_label, view_mode):
+def render_results(df, keyword_count, sort_label, view_mode, gemini_key):
     """결과 표시 (지표 + 카드/표 + 다운로드) - 두 탭에서 공용으로 사용."""
     st.success(f"총 {len(df)}건을 찾았어요! ({sort_label} 기준 정렬됨)")
 
@@ -134,7 +215,7 @@ def render_results(df, keyword_count, sort_label, view_mode):
     col3.metric("검색 키워드", f"{keyword_count}개")
 
     if view_mode == "카드형":
-        render_card_grid(df)
+        render_card_grid(df, gemini_key)
     else:
         table_height = min(38 + 35 * len(df), 800)
         st.dataframe(
@@ -163,6 +244,7 @@ st.title("🔎 신박살림 아이템 발굴기")
 st.caption("유튜브 영상을 검색해서, 뜨고 있는 쇼핑 아이템과 쇼츠 소재를 찾아드려요.")
 
 api_key, key_source = get_api_key()
+gemini_key, gemini_key_source = get_gemini_key()
 
 with st.sidebar:
     st.header("설정")
@@ -176,7 +258,19 @@ with st.sidebar:
         if api_key_input:
             api_key = api_key_input
     else:
-        st.success("API 키가 설정되어 있어요 ✅")
+        st.success("유튜브 API 키가 설정되어 있어요 ✅")
+
+    if gemini_key_source == "manual":
+        gemini_key_input = st.text_input(
+            "Gemini API 키 (선택 - AI 영상 분석용)",
+            type="password",
+            help="aistudio.google.com에서 무료로 발급받을 수 있어요. "
+                 "이 키가 없어도 검색·수집 기능은 그대로 쓸 수 있고, '🔍 AI 분석' 버튼만 못 씁니다.",
+        )
+        if gemini_key_input:
+            gemini_key = gemini_key_input
+    else:
+        st.success("Gemini API 키가 설정되어 있어요 ✅")
 
     st.divider()
     view_mode = st.radio("보기 방식", ["카드형", "표형"], horizontal=True)
@@ -237,6 +331,7 @@ with tab1:
             len(st.session_state.preset_result_keywords),
             "조회수",
             view_mode,
+            gemini_key,
         )
     else:
         st.info("키워드를 확인하고 위 버튼을 눌러보세요.")
@@ -296,6 +391,7 @@ with tab2:
             len(st.session_state.custom_result_keywords),
             "조회수" if sort_by == "views" else "영상점수",
             view_mode,
+            gemini_key,
         )
     else:
         st.info("키워드를 입력한 뒤 '아이템 발굴 시작' 버튼을 눌러보세요.")
