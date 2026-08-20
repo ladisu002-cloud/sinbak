@@ -190,8 +190,17 @@ def find_items(api_key, keywords, max_results, days, shorts_only, shorts_max_sec
                     view_count, subscriber_count, like_count, comment_count
                 )
 
+                thumbnails = v["snippet"].get("thumbnails", {})
+                thumbnail_url = (
+                    thumbnails.get("medium", {}).get("url")
+                    or thumbnails.get("high", {}).get("url")
+                    or thumbnails.get("default", {}).get("url")
+                    or ""
+                )
+
                 all_rows.append({
                     "검색키워드": keyword,
+                    "썸네일": thumbnail_url,
                     "제목": v["snippet"]["title"],
                     "채널명": v["snippet"]["channelTitle"],
                     "조회수": view_count,

@@ -18,6 +18,7 @@ Streamlit UI를 씌운 버전입니다.
 배포 방법은 DEPLOY.md 참고 (GitHub + Streamlit Community Cloud, 무료).
 """
 
+import html
 import os
 from datetime import datetime
 
@@ -29,9 +30,77 @@ from youtube_item_finder import find_items, find_yesterday_top_shopping, DEFAULT
 st.set_page_config(page_title="신박살림 아이템 발굴기", page_icon="🔎", layout="wide")
 
 COLUMN_ORDER = [
-    "검색키워드", "제목", "채널명", "URL", "조회수", "구독자수",
+    "검색키워드", "썸네일", "제목", "채널명", "URL", "조회수", "구독자수",
     "영상점수", "조회수/구독자배수", "참여율(%)", "영상길이(초)", "업로드일",
 ]
+
+CARD_CSS = """
+<style>
+.vcard-grid { display:grid; grid-template-columns:repeat(auto-fill, minmax(170px, 1fr)); gap:16px; margin-top:8px; }
+.vcard { background:#1a1a2e; border-radius:10px; overflow:hidden; }
+.vcard .thumb-wrap { position:relative; width:100%; aspect-ratio:9/16; background:#000; overflow:hidden; }
+.vcard .thumb-wrap img { width:100%; height:100%; object-fit:cover; display:block; }
+.vcard .rank-badge { position:absolute; top:8px; left:8px; background:#f5a623; color:#1a1a2e;
+  font-weight:700; font-size:13px; width:24px; height:24px; border-radius:50%;
+  display:flex; align-items:center; justify-content:center; }
+.vcard .dur-badge { position:absolute; bottom:6px; right:6px; background:rgba(0,0,0,0.75);
+  color:#fff; font-size:11px; padding:2px 6px; border-radius:4px; }
+.vcard .views-badge { position:absolute; bottom:6px; left:6px; background:rgba(0,0,0,0.75);
+  color:#fff; font-size:11px; padding:2px 6px; border-radius:4px; }
+.vcard .body { padding:8px 10px 12px; }
+.vcard .title { font-size:12.5px; font-weight:600; line-height:1.3; height:2.6em; overflow:hidden;
+  display:-webkit-box; -webkit-line-clamp:2; -webkit-box-orient:vertical; margin-bottom:6px; color:#fff; }
+.vcard .channel { font-size:11px; color:#b8b8c8; margin-bottom:8px; }
+.vcard .watch-btn { display:block; text-align:center; background:#3b6fe0; color:#fff !important;
+  text-decoration:none; font-size:12px; font-weight:600; padding:6px 0; border-radius:6px; }
+.vcard .watch-btn:hover { background:#2f5bc4; }
+</style>
+"""
+
+
+def render_card_grid(df):
+    """썸네일 그리드(카드형) 뷰로 결과를 보여준다."""
+    st.markdown(CARD_CSS, unsafe_allow_html=True)
+    cards = ['<div class="vcard-grid">']
+    for i, row in enumerate(df.to_dict("records"), start=1):
+        thumb = html.escape(str(row.get("썸네일") or ""), quote=True)
+        title = html.escape(str(row.get("제목", "")))
+        channel = html.escape(str(row.get("채널명", "")))
+        url = html.escape(str(row.get("URL", "")), quote=True)
+
+        try:
+            views_label = f"{int(row.get('조회수', 0)):,}회"
+        except (TypeError, ValueError):
+            views_label = str(row.get("조회수", "-"))
+
+        subs = row.get("구독자수", "-")
+        try:
+            subs_label = f"구독자 {int(subs):,}"
+        except (TypeError, ValueError):
+            subs_label = "구독자 비공개"
+
+        try:
+            dur = int(row.get("영상길이(초)", 0))
+            dur_label = f"{dur // 60}:{dur % 60:02d}"
+        except (TypeError, ValueError):
+            dur_label = "-"
+
+        cards.append(f"""
+        <div class="vcard">
+          <div class="thumb-wrap">
+            <img src="{thumb}" loading="lazy" alt="thumbnail" />
+            <span class="rank-badge">{i}</span>
+            <span class="views-badge">{views_label}</span>
+            <span class="dur-badge">{dur_label}</span>
+          </div>
+          <div class="body">
+            <div class="title">{title}</div>
+            <div class="channel">{channel} · {subs_label}</div>
+            <a class="watch-btn" href="{url}" target="_blank">▶ 영상 보기</a>
+          </div>
+        </div>""")
+    cards.append("</div>")
+    st.markdown("".join(cards), unsafe_allow_html=True)
 
 
 def get_api_key():
@@ -53,8 +122,8 @@ def reorder(df):
     return df[[c for c in COLUMN_ORDER if c in df.columns]]
 
 
-def render_results(df, keyword_count, sort_label):
-    """결과 표시 (지표 + 표 + 다운로드) - 두 탭에서 공용으로 사용."""
+def render_results(df, keyword_count, sort_label, view_mode):
+    """결과 표시 (지표 + 카드/표 + 다운로드) - 두 탭에서 공용으로 사용."""
     st.success(f"총 {len(df)}건을 찾았어요! ({sort_label} 기준 정렬됨)")
 
     top_score = df[pd.to_numeric(df["영상점수"], errors="coerce").notna()]
@@ -64,20 +133,23 @@ def render_results(df, keyword_count, sort_label):
     col2.metric("영상점수 5점 이상", f"{hot_count}건")
     col3.metric("검색 키워드", f"{keyword_count}개")
 
-    table_height = min(38 + 35 * len(df), 800)
+    if view_mode == "카드형":
+        render_card_grid(df)
+    else:
+        table_height = min(38 + 35 * len(df), 800)
+        st.dataframe(
+            df,
+            use_container_width=True,
+            hide_index=True,
+            height=table_height,
+            column_config={
+                "URL": st.column_config.LinkColumn("링크", display_text="영상 보기"),
+                "썸네일": st.column_config.ImageColumn("썸네일"),
+                "영상점수": st.column_config.NumberColumn("영상점수", format="%.2f"),
+            },
+        )
 
-    st.dataframe(
-        df,
-        use_container_width=True,
-        hide_index=True,
-        height=table_height,
-        column_config={
-            "URL": st.column_config.LinkColumn("링크", display_text="영상 보기"),
-            "영상점수": st.column_config.NumberColumn("영상점수", format="%.2f"),
-        },
-    )
-
-    csv = df.to_csv(index=False).encode("utf-8-sig")
+    csv = df.drop(columns=["썸네일"], errors="ignore").to_csv(index=False).encode("utf-8-sig")
     st.download_button(
         "📥 CSV로 다운로드",
         csv,
@@ -105,6 +177,9 @@ with st.sidebar:
             api_key = api_key_input
     else:
         st.success("API 키가 설정되어 있어요 ✅")
+
+    st.divider()
+    view_mode = st.radio("보기 방식", ["카드형", "표형"], horizontal=True)
 
 for key in ["preset_result_df", "preset_result_keywords", "custom_result_df", "custom_result_keywords"]:
     if key not in st.session_state:
@@ -161,6 +236,7 @@ with tab1:
             st.session_state.preset_result_df,
             len(st.session_state.preset_result_keywords),
             "조회수",
+            view_mode,
         )
     else:
         st.info("키워드를 확인하고 위 버튼을 눌러보세요.")
@@ -219,6 +295,7 @@ with tab2:
             st.session_state.custom_result_df,
             len(st.session_state.custom_result_keywords),
             "조회수" if sort_by == "views" else "영상점수",
+            view_mode,
         )
     else:
         st.info("키워드를 입력한 뒤 '아이템 발굴 시작' 버튼을 눌러보세요.")
