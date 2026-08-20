@@ -146,7 +146,12 @@ def get_channel_subscribers(youtube, channel_ids):
 # 3. 메인 파이프라인
 # ---------------------------------------------------------------------------
 
-def find_items(api_key, keywords, max_results, days, shorts_only, shorts_max_seconds):
+def find_items(api_key, keywords, max_results, days, shorts_only, shorts_max_seconds,
+                sort_by="score", top_n=None):
+    """
+    sort_by: "score" (영상 점수 기준, 기본값) 또는 "views" (조회수 기준)
+    top_n: 정렬 후 상위 N개만 남기고 자르기 (None이면 전체 반환)
+    """
     youtube = build("youtube", "v3", developerKey=api_key)
 
     published_after = None
@@ -205,10 +210,65 @@ def find_items(api_key, keywords, max_results, days, shorts_only, shorts_max_sec
             print(f"  [오류] '{keyword}' 검색 중 API 오류 발생: {e}")
             continue
 
-    # 영상 점수 기준 내림차순 정렬 (점수 없는 항목은 맨 뒤로)
-    all_rows.sort(key=lambda r: r["영상점수"] if isinstance(r["영상점수"], (int, float)) else -1, reverse=True)
+    # 같은 영상이 여러 키워드 검색에 중복으로 잡힐 수 있어 URL 기준으로 중복 제거
+    # (중복된 경우 어떤 키워드들에 걸렸는지 한 줄로 모아서 보여줌)
+    deduped = {}
+    for row in all_rows:
+        url = row["URL"]
+        if url in deduped:
+            existing_keywords = deduped[url]["검색키워드"].split(", ")
+            if row["검색키워드"] not in existing_keywords:
+                deduped[url]["검색키워드"] = ", ".join(existing_keywords + [row["검색키워드"]])
+        else:
+            deduped[url] = row
+    all_rows = list(deduped.values())
+
+    # 정렬 기준 적용: "score"(영상점수) 또는 "views"(조회수)
+    if sort_by == "views":
+        all_rows.sort(key=lambda r: r["조회수"], reverse=True)
+    else:
+        # 영상 점수 기준 내림차순 정렬 (점수 없는 항목은 맨 뒤로)
+        all_rows.sort(key=lambda r: r["영상점수"] if isinstance(r["영상점수"], (int, float)) else -1, reverse=True)
+
+    if top_n:
+        all_rows = all_rows[:top_n]
 
     return all_rows
+
+
+# ---------------------------------------------------------------------------
+# 3-1. 프리셋: "어제 인기 쇼핑쇼츠" 모드
+# ---------------------------------------------------------------------------
+
+DEFAULT_SHOPPING_KEYWORDS = [
+    "쇼핑 꿀템", "쿠팡 추천템", "다이소 꿀템", "가성비템 추천",
+    "신박한 아이템", "살림 꿀템", "1인 가구 꿀템", "리빙 꿀템",
+]
+
+
+def find_yesterday_top_shopping(api_key, keywords=None, top_n=100,
+                                 per_keyword_results=50, days_buffer=2,
+                                 shorts_max_seconds=180):
+    """
+    '어제 조회수가 높았던 쇼핑쇼츠 top_n개'를 찾는 전용 함수.
+    - keywords가 없으면 DEFAULT_SHOPPING_KEYWORDS를 사용
+    - days_buffer: 유튜브 API 인덱싱 지연을 감안해 실제로는 최근 N일을 검색
+      (기본 2일 = '어제'를 안전하게 포함하기 위한 여유값)
+    - 쇼츠 전용, 조회수 기준 정렬 후 상위 top_n개만 반환
+    """
+    if not keywords:
+        keywords = DEFAULT_SHOPPING_KEYWORDS
+
+    return find_items(
+        api_key=api_key,
+        keywords=keywords,
+        max_results=per_keyword_results,
+        days=days_buffer,
+        shorts_only=True,
+        shorts_max_seconds=shorts_max_seconds,
+        sort_by="views",
+        top_n=top_n,
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -300,16 +360,24 @@ def save_html(rows, path, keywords):
 
 def main():
     parser = argparse.ArgumentParser(description="유튜브 아이템 발굴 도구")
-    parser.add_argument("--keywords", nargs="+", required=True, help="검색 키워드 (여러 개 가능)")
+    parser.add_argument("--keywords", nargs="+", default=None, help="검색 키워드 (여러 개 가능)")
+    parser.add_argument("--preset", choices=["shopping-yesterday"], default=None,
+                         help="shopping-yesterday: 어제 조회수 높은 쇼핑쇼츠 100개 (키워드 프리셋 사용, --top-n 기본 100)")
     parser.add_argument("--max-results", type=int, default=30, help="키워드당 최대 수집 개수 (기본 30)")
     parser.add_argument("--days", type=int, default=30, help="최근 N일 이내 영상만 (기본 30일)")
     parser.add_argument("--shorts-only", action="store_true", help="쇼츠(짧은 영상)만 필터링")
     parser.add_argument("--shorts-max-seconds", type=int, default=180, help="쇼츠 판단 기준 길이(초), 기본 180초")
+    parser.add_argument("--sort-by", choices=["score", "views"], default="score", help="정렬 기준 (기본 score)")
+    parser.add_argument("--top-n", type=int, default=None, help="정렬 후 상위 N개만 남기기")
     parser.add_argument("--api-key", default=None, help="유튜브 API 키 (없으면 환경변수 YOUTUBE_API_KEY 사용)")
     parser.add_argument("--out-dir", default="reports", help="결과 저장 폴더")
     args = parser.parse_args()
 
-    api_key = "AIzaSyD4zcv1zX6F_0K7YaQSq2V87YJsvgwLNdw"
+    if not args.preset and not args.keywords:
+        print("--keywords 를 입력하거나 --preset shopping-yesterday 를 사용하세요.")
+        sys.exit(1)
+
+    api_key = args.api_key or os.environ.get("YOUTUBE_API_KEY")
     if not api_key:
         print("API 키가 없습니다. --api-key 옵션을 쓰거나 환경변수 YOUTUBE_API_KEY를 설정하세요.")
         print("API 키 발급 방법은 README.md를 참고하세요.")
@@ -317,14 +385,28 @@ def main():
 
     os.makedirs(args.out_dir, exist_ok=True)
 
-    rows = find_items(
-        api_key=api_key,
-        keywords=args.keywords,
-        max_results=args.max_results,
-        days=args.days,
-        shorts_only=args.shorts_only,
-        shorts_max_seconds=args.shorts_max_seconds,
-    )
+    if args.preset == "shopping-yesterday":
+        rows = find_yesterday_top_shopping(
+            api_key=api_key,
+            keywords=args.keywords,  # None이면 함수 내부 기본 키워드 사용
+            top_n=args.top_n or 100,
+            per_keyword_results=args.max_results if args.max_results != 30 else 50,
+            days_buffer=args.days if args.days != 30 else 2,
+            shorts_max_seconds=args.shorts_max_seconds,
+        )
+        display_keywords = args.keywords or DEFAULT_SHOPPING_KEYWORDS
+    else:
+        rows = find_items(
+            api_key=api_key,
+            keywords=args.keywords,
+            max_results=args.max_results,
+            days=args.days,
+            shorts_only=args.shorts_only,
+            shorts_max_seconds=args.shorts_max_seconds,
+            sort_by=args.sort_by,
+            top_n=args.top_n,
+        )
+        display_keywords = args.keywords
 
     if not rows:
         print("수집된 영상이 없습니다.")
@@ -335,7 +417,7 @@ def main():
     html_path = os.path.join(args.out_dir, f"report_{timestamp}.html")
 
     save_csv(rows, csv_path)
-    save_html(rows, html_path, args.keywords)
+    save_html(rows, html_path, display_keywords)
 
     print(f"\n완료! 총 {len(rows)}건 수집")
     print(f"CSV: {csv_path}")
