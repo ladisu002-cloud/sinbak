@@ -52,8 +52,19 @@ def render_analysis(result):
     """AI 영상 분석 결과(dict)를 보기 좋게 표시."""
     st.markdown(f"**🎯 제품정보**\n\n{result.get('제품정보', '-')}")
 
-    keywords = result.get("추천검색어") or []
-    if keywords:
+    keywords = result.get("추천검색어") or {}
+    if isinstance(keywords, dict):
+        kr = keywords.get("한국어") or []
+        cn = keywords.get("중국어") or []
+        if kr or cn:
+            st.markdown("**🔑 추천 검색어**")
+        if kr:
+            st.caption("🇰🇷 한국어")
+            st.write(" · ".join(f"`{k}`" for k in kr))
+        if cn:
+            st.caption("🇨🇳 중국어")
+            st.write(" · ".join(f"`{k}`" for k in cn))
+    elif isinstance(keywords, list) and keywords:
         st.markdown("**🔑 추천 검색어**")
         st.write(" · ".join(f"`{k}`" for k in keywords))
 
@@ -99,8 +110,86 @@ def run_analysis(video_id, title, channel, gemini_key):
         st.session_state.analysis_results[video_id] = {"error": f"분석 중 오류: {e}"}
 
 
-def render_card_grid(df, gemini_key, cols_per_row=4):
-    """썸네일 카드 그리드 뷰 + 카드별 'AI 분석' 버튼."""
+@st.dialog("영상 분석", width="large")
+def show_video_dialog(row, api_key, gemini_key):
+    """원본 쇼츠 + AI 분석 + 관련 영상 찾기를 한 화면(모달)에서 보여준다."""
+    video_id = extract_video_id(row["URL"])
+
+    col_video, col_info = st.columns([1, 1.2])
+
+    with col_video:
+        st.video(row["URL"])
+        st.caption(f"**{row.get('제목', '')}**")
+        st.caption(f"{row.get('채널명', '')} · 조회수 {row.get('조회수', '-')}")
+
+    with col_info:
+        if video_id not in st.session_state.analysis_results:
+            if not gemini_key:
+                st.warning("Gemini API 키가 없어 분석할 수 없어요. 사이드바에서 입력해주세요.")
+            else:
+                with st.spinner("분석 중..."):
+                    run_analysis(video_id, row.get("제목", ""), row.get("채널명", ""), gemini_key)
+
+        result = st.session_state.analysis_results.get(video_id)
+
+        if result:
+            with st.container(height=420, border=False):
+                if "error" in result:
+                    st.error(result["error"])
+                else:
+                    if not result.get("_had_transcript", True):
+                        st.caption("⚠️ 자막을 가져오지 못해 제목 기반으로 추정한 분석이에요.")
+                    render_analysis(result)
+
+            if "error" not in result:
+                st.divider()
+                related_key = f"related_result_{video_id}"
+
+                if st.button("🔍 관련 영상 더 찾기 (유튜브)", key=f"related_btn_{video_id}", use_container_width=True):
+                    kr_keywords = (result.get("추천검색어") or {}).get("한국어") or []
+                    if not kr_keywords:
+                        st.session_state[related_key] = []
+                        st.warning("추천 검색어가 없어 관련 영상을 찾을 수 없어요.")
+                    elif not api_key:
+                        st.warning("유튜브 API 키가 없어 관련 영상을 찾을 수 없어요.")
+                    else:
+                        with st.spinner("관련 영상 찾는 중..."):
+                            try:
+                                related_rows = find_items(
+                                    api_key=api_key,
+                                    keywords=kr_keywords[:3],
+                                    max_results=15,
+                                    days=180,
+                                    shorts_only=True,
+                                    shorts_max_seconds=180,
+                                    sort_by="views",
+                                )
+                                st.session_state[related_key] = related_rows[:8]
+                            except Exception as e:
+                                st.session_state[related_key] = []
+                                st.error(f"검색 중 오류: {e}")
+
+                if related_key in st.session_state:
+                    related_rows = st.session_state[related_key]
+                    if related_rows:
+                        st.markdown("**관련 영상 (유튜브)**")
+                        for r in related_rows:
+                            try:
+                                views_fmt = f"{int(r['조회수']):,}"
+                            except (TypeError, ValueError):
+                                views_fmt = str(r.get("조회수", "-"))
+                            st.markdown(f"- [{r['제목']}]({r['URL']}) · {r['채널명']} · {views_fmt}회")
+                    else:
+                        st.caption("관련 영상을 찾지 못했어요.")
+
+                st.caption(
+                    "ℹ️ 인스타그램은 공식적으로 열려있는 검색 API가 없어, "
+                    "자동으로 관련 영상을 찾아주는 기능은 지원하지 않아요."
+                )
+
+
+def render_card_grid(df, api_key, gemini_key, cols_per_row=5):
+    """썸네일 카드 그리드 뷰 + 카드별 'AI 분석' 버튼(누르면 모달 오픈)."""
     st.markdown(CARD_CSS, unsafe_allow_html=True)
 
     if "analysis_results" not in st.session_state:
@@ -117,7 +206,6 @@ def render_card_grid(df, gemini_key, cols_per_row=4):
                 title = str(row.get("제목", ""))
                 channel = str(row.get("채널명", ""))
                 url = str(row.get("URL", ""))
-                video_id = extract_video_id(url)
 
                 try:
                     views_label = f"{int(row.get('조회수', 0)):,}회"
@@ -149,22 +237,8 @@ def render_card_grid(df, gemini_key, cols_per_row=4):
 
                 btn_col1, btn_col2 = st.columns(2)
                 btn_col1.link_button("▶ 보기", url, use_container_width=True)
-                analyze_clicked = btn_col2.button(
-                    "🔍 분석", key=f"analyze_{video_id}_{rank}", use_container_width=True
-                )
-                if analyze_clicked:
-                    with st.spinner("분석 중..."):
-                        run_analysis(video_id, title, channel, gemini_key)
-
-                if video_id in st.session_state.analysis_results:
-                    result = st.session_state.analysis_results[video_id]
-                    with st.expander("📊 AI 영상 분석", expanded=True):
-                        if "error" in result:
-                            st.error(result["error"])
-                        else:
-                            if not result.get("_had_transcript", True):
-                                st.caption("⚠️ 이 영상은 자막을 가져오지 못해 제목만으로 추정한 분석이에요.")
-                            render_analysis(result)
+                if btn_col2.button("🔍 분석", key=f"analyze_{extract_video_id(url)}_{rank}", use_container_width=True):
+                    show_video_dialog(row, api_key, gemini_key)
 
                 st.divider()
 
@@ -203,7 +277,7 @@ def reorder(df):
     return df[[c for c in COLUMN_ORDER if c in df.columns]]
 
 
-def render_results(df, keyword_count, sort_label, view_mode, gemini_key):
+def render_results(df, keyword_count, sort_label, view_mode, api_key, gemini_key):
     """결과 표시 (지표 + 카드/표 + 다운로드) - 두 탭에서 공용으로 사용."""
     st.success(f"총 {len(df)}건을 찾았어요! ({sort_label} 기준 정렬됨)")
 
@@ -215,7 +289,7 @@ def render_results(df, keyword_count, sort_label, view_mode, gemini_key):
     col3.metric("검색 키워드", f"{keyword_count}개")
 
     if view_mode == "카드형":
-        render_card_grid(df, gemini_key)
+        render_card_grid(df, api_key, gemini_key)
     else:
         table_height = min(38 + 35 * len(df), 800)
         st.dataframe(
@@ -331,6 +405,7 @@ with tab1:
             len(st.session_state.preset_result_keywords),
             "조회수",
             view_mode,
+            api_key,
             gemini_key,
         )
     else:
@@ -391,6 +466,7 @@ with tab2:
             len(st.session_state.custom_result_keywords),
             "조회수" if sort_by == "views" else "영상점수",
             view_mode,
+            api_key,
             gemini_key,
         )
     else:
