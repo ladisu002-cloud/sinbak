@@ -19,14 +19,19 @@
      보이고 싶지 않으면 Private을 추천합니다.
 4. `Create repository` 클릭
 
-## 3단계. 파일 3개 업로드
+## 3단계. 파일 업로드
 
 방금 만든 저장소 페이지에서 `Add file` → `Upload files` 클릭 후, 아래
-3개 파일을 끌어다 놓고 `Commit changes`:
+파일을 전부 끌어다 놓고 `Commit changes`:
 
 - `streamlit_app.py`
 - `youtube_item_finder.py`
+- `video_analyzer.py`
+- `scene_matcher.py`
 - `requirements.txt`
+- `packages.txt` ⚠️ **장면 매칭(영상 자르기) 기능을 쓰려면 필수** — 이
+  파일이 있어야 Streamlit Cloud 서버에 ffmpeg가 자동으로 설치됩니다.
+  없으면 클립 추출이 안 됩니다.
 
 (README.md도 같이 올려두면 나중에 참고하기 좋습니다.)
 

@@ -11,6 +11,8 @@ Streamlit UI를 씌운 버전입니다.
   1) 어제 인기 쇼핑쇼츠 100개 - 미리 정해둔 쇼핑 키워드로 어제(+여유 1일)
      업로드된 쇼츠 중 조회수 높은 순 top N을 바로 확인하는 빠른 모드
   2) 커스텀 검색 - 원하는 키워드로 자유롭게 검색 (기존 기능)
+  3) 장면 매칭 - 다운로드해둔 벤치마킹 영상을 업로드하면 장면 단위로
+     쪼개고 AI가 설명을 붙인 뒤, 대본 문장마다 어울리는 장면을 매칭
 
 로컬 실행:
     streamlit run streamlit_app.py
@@ -20,6 +22,8 @@ Streamlit UI를 씌운 버전입니다.
 
 import html
 import os
+import tempfile
+import zipfile
 from datetime import datetime
 
 import pandas as pd
@@ -27,6 +31,10 @@ import streamlit as st
 
 from youtube_item_finder import find_items, find_yesterday_top_shopping, DEFAULT_SHOPPING_KEYWORDS
 from video_analyzer import get_transcript, analyze_video, extract_video_id
+from scene_matcher import (
+    build_scene_library, describe_scene, match_script_to_scenes,
+    export_scene_clip, ffmpeg_available,
+)
 
 st.set_page_config(page_title="신박살림 아이템 발굴기", page_icon="🔎", layout="wide")
 
@@ -145,7 +153,7 @@ def show_video_dialog(row, api_key, gemini_key):
                 st.divider()
                 related_key = f"related_result_{video_id}"
 
-                if st.button("🔍 관련 영상 더 찾기 (유튜브)", key=f"related_btn_{video_id}", use_container_width=True):
+                if st.button("🔍 관련 영상 더 찾기 (유튜브)", key=f"related_btn_{video_id}", width="stretch"):
                     kr_keywords = (result.get("추천검색어") or {}).get("한국어") or []
                     if not kr_keywords:
                         st.session_state[related_key] = []
@@ -236,8 +244,8 @@ def render_card_grid(df, api_key, gemini_key, cols_per_row=5):
                 )
 
                 btn_col1, btn_col2 = st.columns(2)
-                btn_col1.link_button("▶ 보기", url, use_container_width=True)
-                if btn_col2.button("🔍 분석", key=f"analyze_{extract_video_id(url)}_{rank}", use_container_width=True):
+                btn_col1.link_button("▶ 보기", url, width="stretch")
+                if btn_col2.button("🔍 분석", key=f"analyze_{extract_video_id(url)}_{rank}", width="stretch"):
                     show_video_dialog(row, api_key, gemini_key)
 
                 st.divider()
@@ -294,7 +302,7 @@ def render_results(df, keyword_count, sort_label, view_mode, api_key, gemini_key
         table_height = min(38 + 35 * len(df), 800)
         st.dataframe(
             df,
-            use_container_width=True,
+            width="stretch",
             hide_index=True,
             height=table_height,
             column_config={
@@ -353,7 +361,7 @@ for key in ["preset_result_df", "preset_result_keywords", "custom_result_df", "c
     if key not in st.session_state:
         st.session_state[key] = None
 
-tab1, tab2 = st.tabs(["🔥 어제 인기 쇼핑쇼츠 100개", "🔍 커스텀 검색"])
+tab1, tab2, tab3 = st.tabs(["🔥 어제 인기 쇼핑쇼츠 100개", "🔍 커스텀 검색", "🎬 장면 매칭"])
 
 # ---------------------------------------------------------------------------
 # 탭 1: 어제 인기 쇼핑쇼츠 100개 (프리셋 모드)
@@ -471,3 +479,199 @@ with tab2:
         )
     else:
         st.info("키워드를 입력한 뒤 '아이템 발굴 시작' 버튼을 눌러보세요.")
+
+# ---------------------------------------------------------------------------
+# 탭 3: 장면 매칭 (벤치마킹 영상 업로드 -> 장면 분할 -> AI 설명 -> 대본 매칭)
+# ---------------------------------------------------------------------------
+MAX_UPLOAD_VIDEOS = 4
+
+for key, default in [
+    ("scene_library", []),
+    ("scene_processed_names", set()),
+    ("scene_temp_dir", None),
+    ("script_matching", {}),
+]:
+    if key not in st.session_state:
+        st.session_state[key] = default
+
+with tab3:
+    st.write(
+        "다운로드해둔 벤치마킹 영상을 올리면, 장면 단위로 쪼개서 AI가 각 장면을 설명하고 "
+        f"대본 문장마다 어울리는 장면을 찾아드려요. **한 번에 최대 {MAX_UPLOAD_VIDEOS}개** 정도로 "
+        "올리는 걸 권장해요 (그 이상은 느려지거나 무료 API 한도에 걸릴 수 있어요)."
+    )
+
+    if not gemini_key:
+        st.warning("이 탭은 Gemini API 키가 꼭 필요해요. 사이드바에서 먼저 입력해주세요.")
+
+    uploaded_videos = st.file_uploader(
+        "벤치마킹 영상 업로드",
+        type=["mp4", "mov", "m4v", "webm"],
+        accept_multiple_files=True,
+        key="scene_uploader",
+    )
+
+    col_a, col_b = st.columns(2)
+    with col_a:
+        max_scenes_per_video = st.slider("영상당 최대 장면 수", min_value=5, max_value=30, value=15)
+    with col_b:
+        scene_sensitivity = st.slider(
+            "장면 전환 민감도 (낮을수록 더 잘게 쪼갬)", min_value=10, max_value=50, value=27
+        )
+
+    if uploaded_videos and len(uploaded_videos) > MAX_UPLOAD_VIDEOS:
+        st.warning(f"{MAX_UPLOAD_VIDEOS}개까지만 처리합니다. 나머지는 무시돼요.")
+        uploaded_videos = uploaded_videos[:MAX_UPLOAD_VIDEOS]
+
+    analyze_scenes_clicked = st.button(
+        "🎬 장면 분석 시작", type="primary", disabled=not uploaded_videos or not gemini_key
+    )
+
+    if analyze_scenes_clicked:
+        if st.session_state.scene_temp_dir is None:
+            st.session_state.scene_temp_dir = tempfile.mkdtemp(prefix="scene_matcher_")
+
+        new_videos = [
+            v for v in uploaded_videos if v.name not in st.session_state.scene_processed_names
+        ]
+
+        if not new_videos:
+            st.info("이미 처리한 영상들이에요. 새 영상을 올려주세요.")
+        else:
+            progress = st.progress(0.0, text="시작 중...")
+            total_steps = len(new_videos) * 2  # 장면분할 1 + 설명생성 1 (개략적 진행률용)
+            done_steps = 0
+
+            for video_file in new_videos:
+                video_path = os.path.join(st.session_state.scene_temp_dir, video_file.name)
+                with open(video_path, "wb") as f:
+                    f.write(video_file.getbuffer())
+
+                progress.progress(done_steps / total_steps, text=f"{video_file.name} 장면 분할 중...")
+                try:
+                    scenes = build_scene_library(
+                        video_path, video_file.name,
+                        threshold=float(scene_sensitivity),
+                    )
+                    scenes = scenes[:max_scenes_per_video]
+                except Exception as e:
+                    st.error(f"{video_file.name} 장면 분할 실패: {e}")
+                    continue
+                done_steps += 1
+
+                for i, scene in enumerate(scenes):
+                    progress.progress(
+                        done_steps / total_steps,
+                        text=f"{video_file.name} - 장면 설명 생성 중 ({i+1}/{len(scenes)})",
+                    )
+                    if scene["thumbnail"]:
+                        try:
+                            scene["description"] = describe_scene(gemini_key, scene["thumbnail"])
+                        except Exception as e:
+                            scene["description"] = None
+                            st.caption(f"⚠️ 장면 설명 실패({scene['scene_id']}): {e}")
+                done_steps += 1
+
+                st.session_state.scene_library.extend(scenes)
+                st.session_state.scene_processed_names.add(video_file.name)
+
+            progress.progress(1.0, text="완료!")
+
+    if st.session_state.scene_library:
+        st.markdown(f"**장면 라이브러리 ({len(st.session_state.scene_library)}개)**")
+        lib_cols = st.columns(6)
+        for i, scene in enumerate(st.session_state.scene_library):
+            with lib_cols[i % 6]:
+                if scene["thumbnail"]:
+                    st.image(scene["thumbnail"], width="stretch")
+                st.caption(
+                    f"{scene['video_name']} · {scene['start_sec']:.1f}~{scene['end_sec']:.1f}초\n\n"
+                    f"{scene['description'] or '(설명 없음)'}"
+                )
+
+        st.divider()
+        st.markdown("**대본 입력** (한 줄에 한 문장씩)")
+        script_text = st.text_area(
+            "대본",
+            placeholder="악마들을 막아준 미국 천재의 발명품\n이 조그만게 컴퓨터야\n레트로 컴퓨터 디자인에 픽셀 아트를 넣었거든",
+            height=140,
+            label_visibility="collapsed",
+        )
+
+        if st.button("🎯 대본에 맞는 장면 매칭하기", type="primary", disabled=not gemini_key):
+            script_lines = [line.strip() for line in script_text.split("\n") if line.strip()]
+            if not script_lines:
+                st.warning("대본을 먼저 입력해주세요.")
+            else:
+                with st.spinner("장면 매칭 중..."):
+                    try:
+                        matches = match_script_to_scenes(gemini_key, script_lines, st.session_state.scene_library)
+                        st.session_state.script_matching = {"lines": script_lines, "matches": matches}
+                    except Exception as e:
+                        st.error(f"매칭 중 오류: {e}")
+
+        if st.session_state.script_matching:
+            lines = st.session_state.script_matching["lines"]
+            matches = st.session_state.script_matching["matches"]
+            scene_by_id = {s["scene_id"]: s for s in st.session_state.scene_library}
+            scene_ids_with_desc = [s["scene_id"] for s in st.session_state.scene_library if s["description"]]
+
+            st.markdown("**매칭 결과** (마음에 안 들면 드롭다운에서 다른 장면으로 바꿀 수 있어요)")
+
+            for idx, line in enumerate(lines):
+                m_col1, m_col2 = st.columns([1, 3])
+                match = matches.get(idx)
+                current_scene_id = match["scene_id"] if match else None
+
+                with m_col1:
+                    if current_scene_id and scene_by_id.get(current_scene_id, {}).get("thumbnail"):
+                        st.image(scene_by_id[current_scene_id]["thumbnail"], width="stretch")
+                    else:
+                        st.caption("매칭된 장면 없음")
+
+                with m_col2:
+                    st.markdown(f"**{idx+1}. {line}**")
+                    options = ["(매칭 안 함)"] + scene_ids_with_desc
+                    default_idx = options.index(current_scene_id) if current_scene_id in options else 0
+                    chosen = st.selectbox(
+                        "장면 선택", options, index=default_idx,
+                        key=f"scene_choice_{idx}", label_visibility="collapsed",
+                    )
+                    if chosen != "(매칭 안 함)":
+                        st.session_state.script_matching["matches"][idx] = {"scene_id": chosen, "이유": match.get("이유", "") if match else ""}
+                        chosen_scene = scene_by_id[chosen]
+                        st.caption(f"{chosen_scene['description']} · {chosen_scene['start_sec']:.1f}~{chosen_scene['end_sec']:.1f}초")
+                st.divider()
+
+            if st.button("📦 선택한 장면들 클립으로 내보내기 (zip)"):
+                if not ffmpeg_available():
+                    st.error(
+                        "ffmpeg를 찾을 수 없어 클립을 만들 수 없어요. "
+                        "Streamlit Cloud에 배포했다면 저장소에 packages.txt 파일을 만들고 "
+                        "그 안에 'ffmpeg' 한 줄을 추가한 뒤 다시 배포해주세요."
+                    )
+                else:
+                    export_dir = tempfile.mkdtemp(prefix="scene_export_")
+                    zip_path = os.path.join(export_dir, "matched_clips.zip")
+                    with st.spinner("클립 추출 중..."):
+                        with zipfile.ZipFile(zip_path, "w") as zf:
+                            for idx, line in enumerate(lines):
+                                match = st.session_state.script_matching["matches"].get(idx)
+                                if not match:
+                                    continue
+                                scene = scene_by_id.get(match["scene_id"])
+                                if not scene:
+                                    continue
+                                clip_path = os.path.join(export_dir, f"{idx+1:02d}_{scene['scene_id'].replace('#', '_')}.mp4")
+                                try:
+                                    export_scene_clip(scene["video_path"], scene["start_sec"], scene["end_sec"], clip_path)
+                                    zf.write(clip_path, os.path.basename(clip_path))
+                                except Exception as e:
+                                    st.error(f"{idx+1}번 문장 클립 추출 실패: {e}")
+
+                    with open(zip_path, "rb") as f:
+                        st.download_button(
+                            "📥 클립 zip 다운로드", f, file_name="matched_clips.zip", mime="application/zip"
+                        )
+    else:
+        st.info("영상을 올리고 '장면 분석 시작'을 눌러보세요.")
