@@ -29,7 +29,11 @@ from youtube_transcript_api._errors import (
     TranscriptsDisabled,
 )
 
-DEFAULT_MODEL = "gemini-2.5-flash-lite"
+DEFAULT_MODEL = "gemini-3.5-flash-lite"
+# 2026-08-22: Google이 API 오류 메시지로 직접 "gemini-2.5-flash-lite는 신규
+# 사용자에게 더 이상 제공되지 않으니 gemini-3.5-flash-lite로 바꾸라"고 안내함.
+# 모델 이름이 매우 자주 바뀌니, 또 404가 나면 오류 메시지에 적힌 새 모델
+# 이름으로 이 값을 바꿔주면 된다.
 
 MAX_TRANSCRIPT_CHARS = 6000
 
@@ -132,9 +136,27 @@ class QuotaExceededError(Exception):
     pass
 
 
+class ModelUnavailableError(Exception):
+    """모델이 단종/변경되었을 때 (404) 구분해서 처리하기 위한 전용 예외."""
+    pass
+
+
 def _is_quota_error(e):
     from google.genai.errors import ClientError
     return isinstance(e, ClientError) and getattr(e, "code", None) == 429
+
+
+def _is_model_unavailable_error(e):
+    from google.genai.errors import ClientError
+    return isinstance(e, ClientError) and getattr(e, "code", None) == 404
+
+
+def _classify_and_reraise(e):
+    if _is_quota_error(e):
+        raise QuotaExceededError(str(e)) from e
+    if _is_model_unavailable_error(e):
+        raise ModelUnavailableError(str(e)) from e
+    raise
 
 
 def analyze_video(gemini_api_key, title, channel, transcript_segments, model=DEFAULT_MODEL):
@@ -156,9 +178,7 @@ def analyze_video(gemini_api_key, title, channel, transcript_segments, model=DEF
             config=types.GenerateContentConfig(response_mime_type="application/json"),
         )
     except Exception as e:
-        if _is_quota_error(e):
-            raise QuotaExceededError(str(e)) from e
-        raise
+        _classify_and_reraise(e)
 
     return parse_analysis_response(response.text)
 
@@ -227,9 +247,7 @@ def generate_script(gemini_api_key, product_info, style_key, target_length_sec=3
     try:
         response = client.models.generate_content(model=model, contents=prompt)
     except Exception as e:
-        if _is_quota_error(e):
-            raise QuotaExceededError(str(e)) from e
-        raise
+        _classify_and_reraise(e)
 
     lines = [line.strip() for line in response.text.strip().split("\n") if line.strip()]
     return "\n".join(lines)

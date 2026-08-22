@@ -33,10 +33,13 @@ from youtube_item_finder import find_items, find_yesterday_top_shopping, DEFAULT
 from video_analyzer import (
     get_transcript, analyze_video, extract_video_id, generate_script, SCRIPT_STYLES,
     QuotaExceededError as AnalyzerQuotaError,
+    ModelUnavailableError as AnalyzerModelError,
 )
 from scene_matcher import (
     build_scene_library, describe_scene, match_script_to_scenes,
-    export_scene_clip, ffmpeg_available, QuotaExceededError as SceneQuotaError,
+    export_scene_clip, ffmpeg_available,
+    QuotaExceededError as SceneQuotaError,
+    ModelUnavailableError as SceneModelError,
 )
 
 st.set_page_config(page_title="신박살림 아이템 발굴기", page_icon="🔎", layout="wide")
@@ -120,6 +123,11 @@ def run_analysis(video_id, title, channel, gemini_key):
     except AnalyzerQuotaError:
         st.session_state.analysis_results[video_id] = {
             "error": "Gemini 무료 API 일일 한도를 초과했어요. 잠시 후 다시 시도해주세요."
+        }
+    except AnalyzerModelError as e:
+        st.session_state.analysis_results[video_id] = {
+            "error": f"현재 설정된 AI 모델을 더 이상 쓸 수 없어요. 아래 안내를 참고해 "
+                     f"`video_analyzer.py`의 DEFAULT_MODEL 값을 바꿔주세요.\n\n{e}"
         }
     except Exception as e:
         st.session_state.analysis_results[video_id] = {"error": f"분석 중 오류: {e}"}
@@ -595,6 +603,13 @@ with tab3:
                                 "저장됩니다. 잠시 후 다시 시도하거나, `video_analyzer.py` / "
                                 "`scene_matcher.py`의 DEFAULT_MODEL을 다른 모델로 바꿔보세요."
                             )
+                        except SceneModelError as e:
+                            scene["description"] = None
+                            quota_hit = True  # 이름은 quota지만 '더 이상 진행 못 함' 신호로 재사용
+                            st.error(
+                                f"⚠️ 현재 설정된 AI 모델을 더 이상 쓸 수 없어요. "
+                                f"`scene_matcher.py`의 DEFAULT_MODEL 값을 아래 안내된 모델로 바꿔주세요.\n\n{e}"
+                            )
                         except Exception as e:
                             scene["description"] = None
                             st.caption(f"⚠️ 장면 설명 실패({scene['scene_id']}): {e}")
@@ -643,6 +658,11 @@ with tab3:
                             )
                         except AnalyzerQuotaError:
                             st.warning("⚠️ Gemini 무료 API 일일 한도를 초과했어요. 잠시 후 다시 시도해주세요.")
+                        except AnalyzerModelError as e:
+                            st.error(
+                                f"⚠️ 현재 설정된 AI 모델을 더 이상 쓸 수 없어요. "
+                                f"`video_analyzer.py`의 DEFAULT_MODEL 값을 아래 안내된 모델로 바꿔주세요.\n\n{e}"
+                            )
                         except Exception as e:
                             st.error(f"대본 생성 중 오류: {e}")
 
@@ -666,6 +686,11 @@ with tab3:
                         st.session_state.script_matching = {"lines": script_lines, "matches": matches}
                     except SceneQuotaError:
                         st.warning("⚠️ Gemini 무료 API 일일 한도를 초과했어요. 잠시 후 다시 시도해주세요.")
+                    except SceneModelError as e:
+                        st.error(
+                            f"⚠️ 현재 설정된 AI 모델을 더 이상 쓸 수 없어요. "
+                            f"`scene_matcher.py`의 DEFAULT_MODEL 값을 아래 안내된 모델로 바꿔주세요.\n\n{e}"
+                        )
                     except Exception as e:
                         st.error(f"매칭 중 오류: {e}")
 

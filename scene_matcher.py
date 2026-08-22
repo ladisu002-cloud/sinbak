@@ -28,12 +28,11 @@ import cv2
 from scenedetect import open_video, SceneManager
 from scenedetect.detectors import ContentDetector
 
-DEFAULT_MODEL = "gemini-2.5-flash-lite"
-# 참고: 2026년 8월 기준 최신 gemini-flash-latest(3.7 flash)는 무료 티어 한도가
-# 하루 20회로 매우 빡빡해서, 장면 하나하나마다 호출하는 이 기능에는 부적합했다.
-# flash-lite 계열은 대량 호출용으로 설계돼 있어 무료 한도가 훨씬 넉넉한 편이다.
-# 그래도 한도는 계속 바뀌니, 429 오류가 자주 나면 aistudio.google.com에서
-# 현재 무료 한도가 넉넉한 모델로 이 값을 바꿔보자.
+DEFAULT_MODEL = "gemini-3.5-flash-lite"
+# 2026-08-22: Google이 API 오류 메시지로 직접 "gemini-2.5-flash-lite는 신규
+# 사용자에게 더 이상 제공되지 않으니 gemini-3.5-flash-lite로 바꾸라"고 안내함.
+# 모델 이름이 매우 자주 바뀌니, 또 404가 나면 오류 메시지에 적힌 새 모델
+# 이름으로 이 값을 바꿔주면 된다.
 
 MAX_SCENES_PER_VIDEO = 40  # 너무 잘게 쪼개지는 것 방지 (안전장치)
 
@@ -105,9 +104,31 @@ class QuotaExceededError(Exception):
     pass
 
 
+class ModelUnavailableError(Exception):
+    """모델이 단종/변경되었을 때 (404) 구분해서 처리하기 위한 전용 예외.
+    Gemini 모델 이름이 워낙 자주 바뀌어서, 어느 함수에서 나든 알아보기 쉽게
+    만들어둔다. 보통 오류 메시지 안에 대체 모델 이름이 들어있어 그대로
+    보여주는 게 유용하다."""
+    pass
+
+
 def _is_quota_error(e):
     from google.genai.errors import ClientError
     return isinstance(e, ClientError) and getattr(e, "code", None) == 429
+
+
+def _is_model_unavailable_error(e):
+    from google.genai.errors import ClientError
+    return isinstance(e, ClientError) and getattr(e, "code", None) == 404
+
+
+def _classify_and_reraise(e):
+    """describe_scene/match_script_to_scenes 공용 예외 분류."""
+    if _is_quota_error(e):
+        raise QuotaExceededError(str(e)) from e
+    if _is_model_unavailable_error(e):
+        raise ModelUnavailableError(str(e)) from e
+    raise
 
 
 def describe_scene(gemini_api_key, thumbnail_bytes, model=DEFAULT_MODEL):
@@ -127,9 +148,7 @@ def describe_scene(gemini_api_key, thumbnail_bytes, model=DEFAULT_MODEL):
             ],
         )
     except Exception as e:
-        if _is_quota_error(e):
-            raise QuotaExceededError(str(e)) from e
-        raise
+        _classify_and_reraise(e)
     return response.text.strip().strip('"').strip("'")
 
 
@@ -177,9 +196,7 @@ def match_script_to_scenes(gemini_api_key, script_lines, scene_library, model=DE
             config=types.GenerateContentConfig(response_mime_type="application/json"),
         )
     except Exception as e:
-        if _is_quota_error(e):
-            raise QuotaExceededError(str(e)) from e
-        raise
+        _classify_and_reraise(e)
 
     raw = response.text.strip()
     raw = re.sub(r"^```(?:json)?\s*", "", raw)
