@@ -30,10 +30,13 @@ import pandas as pd
 import streamlit as st
 
 from youtube_item_finder import find_items, find_yesterday_top_shopping, DEFAULT_SHOPPING_KEYWORDS
-from video_analyzer import get_transcript, analyze_video, extract_video_id
+from video_analyzer import (
+    get_transcript, analyze_video, extract_video_id, generate_script, SCRIPT_STYLES,
+    QuotaExceededError as AnalyzerQuotaError,
+)
 from scene_matcher import (
     build_scene_library, describe_scene, match_script_to_scenes,
-    export_scene_clip, ffmpeg_available,
+    export_scene_clip, ffmpeg_available, QuotaExceededError as SceneQuotaError,
 )
 
 st.set_page_config(page_title="신박살림 아이템 발굴기", page_icon="🔎", layout="wide")
@@ -114,6 +117,10 @@ def run_analysis(video_id, title, channel, gemini_key):
         )
         result["_had_transcript"] = segments is not None
         st.session_state.analysis_results[video_id] = result
+    except AnalyzerQuotaError:
+        st.session_state.analysis_results[video_id] = {
+            "error": "Gemini 무료 API 일일 한도를 초과했어요. 잠시 후 다시 시도해주세요."
+        }
     except Exception as e:
         st.session_state.analysis_results[video_id] = {"error": f"분석 중 오류: {e}"}
 
@@ -513,10 +520,18 @@ with tab3:
 
     col_a, col_b = st.columns(2)
     with col_a:
-        max_scenes_per_video = st.slider("영상당 최대 장면 수", min_value=5, max_value=30, value=15)
+        max_scenes_per_video = st.slider("영상당 최대 장면 수", min_value=5, max_value=20, value=8)
     with col_b:
         scene_sensitivity = st.slider(
             "장면 전환 민감도 (낮을수록 더 잘게 쪼갬)", min_value=10, max_value=50, value=27
+        )
+
+    if uploaded_videos:
+        est_calls = len(uploaded_videos[:MAX_UPLOAD_VIDEOS]) * max_scenes_per_video
+        st.caption(
+            f"ℹ️ 예상 AI 호출 수: 최대 약 {est_calls}번 (영상 {len(uploaded_videos[:MAX_UPLOAD_VIDEOS])}개 "
+            f"× 영상당 최대 {max_scenes_per_video}장면). Gemini 무료 한도는 모델/시점에 따라 하루 "
+            "20~수백 회로 차이가 커서, 한도에 걸리면 장면 수를 줄이거나 나중에 다시 시도해주세요."
         )
 
     if uploaded_videos and len(uploaded_videos) > MAX_UPLOAD_VIDEOS:
@@ -559,7 +574,12 @@ with tab3:
                     continue
                 done_steps += 1
 
+                quota_hit = False
                 for i, scene in enumerate(scenes):
+                    if quota_hit:
+                        scene["description"] = None
+                        continue
+
                     progress.progress(
                         done_steps / total_steps,
                         text=f"{video_file.name} - 장면 설명 생성 중 ({i+1}/{len(scenes)})",
@@ -567,6 +587,14 @@ with tab3:
                     if scene["thumbnail"]:
                         try:
                             scene["description"] = describe_scene(gemini_key, scene["thumbnail"])
+                        except SceneQuotaError:
+                            scene["description"] = None
+                            quota_hit = True
+                            st.warning(
+                                "⚠️ Gemini 무료 API 일일 한도를 초과했어요. 남은 장면들은 설명 없이 "
+                                "저장됩니다. 잠시 후 다시 시도하거나, `video_analyzer.py` / "
+                                "`scene_matcher.py`의 DEFAULT_MODEL을 다른 모델로 바꿔보세요."
+                            )
                         except Exception as e:
                             scene["description"] = None
                             st.caption(f"⚠️ 장면 설명 실패({scene['scene_id']}): {e}")
@@ -590,12 +618,41 @@ with tab3:
                 )
 
         st.divider()
-        st.markdown("**대본 입력** (한 줄에 한 문장씩)")
+
+        if "script_text_area" not in st.session_state:
+            st.session_state.script_text_area = ""
+
+        with st.expander("✍️ 대본 자동 생성 (선택 - 대본이 이미 있으면 건너뛰어도 돼요)", expanded=not st.session_state.script_text_area):
+            product_info = st.text_area(
+                "소개할 제품 설명",
+                placeholder="예: 방문에 붙이는 실리콘 문 끼임 방지 패드, 강아지/고양이 발 보호, 부착식",
+                height=80,
+            )
+            style_choice = st.selectbox("대본 스타일", list(SCRIPT_STYLES.keys()))
+            st.caption(SCRIPT_STYLES[style_choice])
+            target_len = st.slider("목표 길이(초)", min_value=15, max_value=60, value=30, step=5)
+
+            if st.button("✨ 대본 생성하기", disabled=not gemini_key):
+                if not product_info.strip():
+                    st.warning("제품 설명을 먼저 입력해주세요.")
+                else:
+                    with st.spinner("대본 작성 중..."):
+                        try:
+                            st.session_state.script_text_area = generate_script(
+                                gemini_key, product_info, style_choice, target_len
+                            )
+                        except AnalyzerQuotaError:
+                            st.warning("⚠️ Gemini 무료 API 일일 한도를 초과했어요. 잠시 후 다시 시도해주세요.")
+                        except Exception as e:
+                            st.error(f"대본 생성 중 오류: {e}")
+
+        st.markdown("**대본** (한 줄에 한 문장씩 - 위에서 자동 생성했다면 이미 채워져 있어요)")
         script_text = st.text_area(
             "대본",
             placeholder="악마들을 막아준 미국 천재의 발명품\n이 조그만게 컴퓨터야\n레트로 컴퓨터 디자인에 픽셀 아트를 넣었거든",
             height=140,
             label_visibility="collapsed",
+            key="script_text_area",
         )
 
         if st.button("🎯 대본에 맞는 장면 매칭하기", type="primary", disabled=not gemini_key):
@@ -607,6 +664,8 @@ with tab3:
                     try:
                         matches = match_script_to_scenes(gemini_key, script_lines, st.session_state.scene_library)
                         st.session_state.script_matching = {"lines": script_lines, "matches": matches}
+                    except SceneQuotaError:
+                        st.warning("⚠️ Gemini 무료 API 일일 한도를 초과했어요. 잠시 후 다시 시도해주세요.")
                     except Exception as e:
                         st.error(f"매칭 중 오류: {e}")
 

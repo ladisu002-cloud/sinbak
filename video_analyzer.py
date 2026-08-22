@@ -29,7 +29,7 @@ from youtube_transcript_api._errors import (
     TranscriptsDisabled,
 )
 
-DEFAULT_MODEL = "gemini-flash-latest"
+DEFAULT_MODEL = "gemini-2.5-flash-lite"
 
 MAX_TRANSCRIPT_CHARS = 6000
 
@@ -127,6 +127,16 @@ def parse_analysis_response(raw_text):
     return data
 
 
+class QuotaExceededError(Exception):
+    """Gemini 무료 할당량을 초과했을 때 (429) 구분해서 처리하기 위한 전용 예외."""
+    pass
+
+
+def _is_quota_error(e):
+    from google.genai.errors import ClientError
+    return isinstance(e, ClientError) and getattr(e, "code", None) == 429
+
+
 def analyze_video(gemini_api_key, title, channel, transcript_segments, model=DEFAULT_MODEL):
     """
     영상 정보 + 자막을 Gemini에 보내 구조화된 분석 결과(dict)를 받는다.
@@ -139,13 +149,90 @@ def analyze_video(gemini_api_key, title, channel, transcript_segments, model=DEF
     prompt = ANALYSIS_PROMPT_TEMPLATE.format(title=title, channel=channel, transcript=transcript_text)
 
     client = genai.Client(api_key=gemini_api_key)
-    response = client.models.generate_content(
-        model=model,
-        contents=prompt,
-        config=types.GenerateContentConfig(response_mime_type="application/json"),
-    )
+    try:
+        response = client.models.generate_content(
+            model=model,
+            contents=prompt,
+            config=types.GenerateContentConfig(response_mime_type="application/json"),
+        )
+    except Exception as e:
+        if _is_quota_error(e):
+            raise QuotaExceededError(str(e)) from e
+        raise
 
     return parse_analysis_response(response.text)
+
+
+# ---------------------------------------------------------------------------
+# 대본 자동 생성 (스타일 템플릿 기반)
+# ---------------------------------------------------------------------------
+
+SCRIPT_STYLES = {
+    "가치비교형": (
+        "가격만 보면 별거 아닌 것 같지만 실제로는 훨씬 큰 가치를 준다는 걸 "
+        "강조하는 방식. '이 가격에 이게 된다고?' 같은 반전으로 시작해서, "
+        "비슷한 가격대의 다른 제품과 비교하며 왜 더 낫는지 보여준다."
+    ),
+    "전후비교형": (
+        "쓰기 전과 쓴 후의 극적인 차이를 대비시키는 방식. 불편했던 상황을 "
+        "먼저 보여주고, 제품을 쓴 뒤 확 달라진 모습으로 전환한다."
+    ),
+    "정체공개형": (
+        "처음엔 정체를 숨기거나 궁금증을 유발하는 질문으로 시작해서, "
+        "점점 힌트를 주다가 마지막에 제품의 정체를 공개하는 방식."
+    ),
+    "베스트공개형": (
+        "여러 개의 후보 아이템을 순위나 리스트 형태로 소개하며, 각각의 "
+        "핵심 장점을 짧고 강렬하게 전달하는 방식."
+    ),
+}
+
+SCRIPT_GENERATION_PROMPT_TEMPLATE = """당신은 쇼핑 쇼츠 대본 작가입니다. 아래 제품 설명과 스타일 가이드를
+참고해서, 새로운 쇼츠 대본을 작성하세요.
+
+[제품 설명]
+{product_info}
+
+[스타일: {style_name}]
+{style_guide}
+
+[조건]
+- 전체 길이는 {target_length_sec}초 분량 (문장 7~10개 정도)
+- 각 문장은 짧고 구어체로, 실제로 소리 내어 말하듯 자연스럽게
+- 첫 문장은 반드시 시청자의 시선을 3초 안에 붙잡는 강한 후킹으로 시작
+- 마지막 문장에는 댓글/저장/구매 유도 등 자연스러운 CTA를 포함
+- 과장광고나 확인되지 않은 효능 주장은 하지 말 것
+
+대본만 출력하세요. 문장 사이는 줄바꿈으로 구분하고, 번호나 따옴표,
+설명은 붙이지 마세요.
+"""
+
+
+def generate_script(gemini_api_key, product_info, style_key, target_length_sec=30, model=DEFAULT_MODEL):
+    """제품 설명 + 스타일 템플릿 -> 쇼츠 대본(문장별 줄바꿈 문자열)."""
+    from google import genai
+
+    style_guide = SCRIPT_STYLES.get(style_key)
+    if not style_guide:
+        raise ValueError(f"알 수 없는 스타일: {style_key}")
+
+    prompt = SCRIPT_GENERATION_PROMPT_TEMPLATE.format(
+        product_info=product_info,
+        style_name=style_key,
+        style_guide=style_guide,
+        target_length_sec=target_length_sec,
+    )
+
+    client = genai.Client(api_key=gemini_api_key)
+    try:
+        response = client.models.generate_content(model=model, contents=prompt)
+    except Exception as e:
+        if _is_quota_error(e):
+            raise QuotaExceededError(str(e)) from e
+        raise
+
+    lines = [line.strip() for line in response.text.strip().split("\n") if line.strip()]
+    return "\n".join(lines)
 
 
 def extract_video_id(url):

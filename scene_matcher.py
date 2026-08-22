@@ -28,7 +28,12 @@ import cv2
 from scenedetect import open_video, SceneManager
 from scenedetect.detectors import ContentDetector
 
-DEFAULT_MODEL = "gemini-flash-latest"
+DEFAULT_MODEL = "gemini-2.5-flash-lite"
+# 참고: 2026년 8월 기준 최신 gemini-flash-latest(3.7 flash)는 무료 티어 한도가
+# 하루 20회로 매우 빡빡해서, 장면 하나하나마다 호출하는 이 기능에는 부적합했다.
+# flash-lite 계열은 대량 호출용으로 설계돼 있어 무료 한도가 훨씬 넉넉한 편이다.
+# 그래도 한도는 계속 바뀌니, 429 오류가 자주 나면 aistudio.google.com에서
+# 현재 무료 한도가 넉넉한 모델로 이 값을 바꿔보자.
 
 MAX_SCENES_PER_VIDEO = 40  # 너무 잘게 쪼개지는 것 방지 (안전장치)
 
@@ -95,21 +100,36 @@ def build_scene_library(video_path, video_name, threshold=27.0, min_scene_len_se
     return library
 
 
+class QuotaExceededError(Exception):
+    """Gemini 무료 할당량을 초과했을 때 (429) 구분해서 처리하기 위한 전용 예외."""
+    pass
+
+
+def _is_quota_error(e):
+    from google.genai.errors import ClientError
+    return isinstance(e, ClientError) and getattr(e, "code", None) == 429
+
+
 def describe_scene(gemini_api_key, thumbnail_bytes, model=DEFAULT_MODEL):
     """장면 썸네일 이미지 -> AI가 2~6단어 정도의 짧은 한국어 설명 생성."""
     from google import genai
     from google.genai import types
 
     client = genai.Client(api_key=gemini_api_key)
-    response = client.models.generate_content(
-        model=model,
-        contents=[
-            types.Part.from_bytes(data=thumbnail_bytes, mime_type="image/jpeg"),
-            "이 쇼츠 영상의 한 장면이야. 이 장면에서 뭘 보여주고 있는지 "
-            "2~6단어의 짧은 한국어 구절로만 답해. 예: '제품 언박싱 시연', "
-            "'제품 클로즈업', '사용 전후 비교'. 다른 설명 없이 구절만 출력해.",
-        ],
-    )
+    try:
+        response = client.models.generate_content(
+            model=model,
+            contents=[
+                types.Part.from_bytes(data=thumbnail_bytes, mime_type="image/jpeg"),
+                "이 쇼츠 영상의 한 장면이야. 이 장면에서 뭘 보여주고 있는지 "
+                "2~6단어의 짧은 한국어 구절로만 답해. 예: '제품 언박싱 시연', "
+                "'제품 클로즈업', '사용 전후 비교'. 다른 설명 없이 구절만 출력해.",
+            ],
+        )
+    except Exception as e:
+        if _is_quota_error(e):
+            raise QuotaExceededError(str(e)) from e
+        raise
     return response.text.strip().strip('"').strip("'")
 
 
@@ -150,11 +170,16 @@ def match_script_to_scenes(gemini_api_key, script_lines, scene_library, model=DE
     prompt = MATCH_PROMPT_TEMPLATE.format(script_lines=numbered_lines, scene_list=scene_list_text)
 
     client = genai.Client(api_key=gemini_api_key)
-    response = client.models.generate_content(
-        model=model,
-        contents=prompt,
-        config=types.GenerateContentConfig(response_mime_type="application/json"),
-    )
+    try:
+        response = client.models.generate_content(
+            model=model,
+            contents=prompt,
+            config=types.GenerateContentConfig(response_mime_type="application/json"),
+        )
+    except Exception as e:
+        if _is_quota_error(e):
+            raise QuotaExceededError(str(e)) from e
+        raise
 
     raw = response.text.strip()
     raw = re.sub(r"^```(?:json)?\s*", "", raw)
