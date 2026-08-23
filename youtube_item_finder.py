@@ -250,9 +250,11 @@ def find_items(api_key, keywords, max_results, days, shorts_only, shorts_max_sec
 # ---------------------------------------------------------------------------
 
 DEFAULT_SHOPPING_KEYWORDS = [
-    "쇼핑 꿀템", "쿠팡 추천템", "다이소 꿀템", "가성비템 추천",
+    "쇼핑 꿀템", "쿠팡 추천템", "쿠팡 히트템", "가성비템 추천",
     "신박한 아이템", "살림 꿀템", "1인 가구 꿀템", "리빙 꿀템",
 ]
+# 다이소 꿀템은 일부러 뺐다 - 다이소 전용 상품은 쿠팡에 없는 경우가 많아서
+# 쿠팡 제휴 링크로 연결하기 어려운 결과가 많이 섞였다.
 
 
 def find_yesterday_top_shopping(api_key, keywords=None, top_n=100,
