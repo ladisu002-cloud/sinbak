@@ -41,6 +41,7 @@ from scene_matcher import (
     QuotaExceededError as SceneQuotaError,
     ModelUnavailableError as SceneModelError,
 )
+from key_pool import parse_keys, call_with_fallback
 
 st.set_page_config(page_title="신박살림 아이템 발굴기", page_icon="🔎", layout="wide")
 
@@ -112,12 +113,14 @@ def run_analysis(video_id, title, channel, gemini_key, product_hint=None):
 
     try:
         segments = get_transcript(video_id)
-        result = analyze_video(
-            gemini_api_key=gemini_key,
-            title=title,
-            channel=channel,
-            transcript_segments=segments,
+        result = call_with_fallback(
+            parse_keys(gemini_key),
+            analyze_video,
+            title,
+            channel,
+            segments,
             product_hint=product_hint,
+            quota_errors=(AnalyzerQuotaError,),
         )
         result["_had_transcript"] = segments is not None
         st.session_state.analysis_results[video_id] = result
@@ -382,7 +385,11 @@ with st.sidebar:
             "Gemini API 키 (선택 - AI 영상 분석용)",
             type="password",
             help="aistudio.google.com에서 무료로 발급받을 수 있어요. "
-                 "이 키가 없어도 검색·수집 기능은 그대로 쓸 수 있고, '🔍 AI 분석' 버튼만 못 씁니다.",
+                 "이 키가 없어도 검색·수집 기능은 그대로 쓸 수 있고, '🔍 AI 분석' 버튼만 못 씁니다. "
+                 "여러 개 쓰려면 쉼표(,)로 구분해서 입력하세요 - 첫 번째 키가 무료 한도를 "
+                 "초과하면 자동으로 다음 키로 넘어갑니다. 단, 무료 한도는 '키'가 아니라 "
+                 "'프로젝트' 단위로 체크되니, 서로 다른 프로젝트에서 발급받은 키를 넣어야 "
+                 "실제로 효과가 있어요 (같은 프로젝트의 키 여러 개는 소용없음).",
         )
         if gemini_key_input:
             gemini_key = gemini_key_input
@@ -614,7 +621,10 @@ with tab3:
                     )
                     if scene["thumbnail"]:
                         try:
-                            scene["description"] = describe_scene(gemini_key, scene["thumbnail"])
+                            scene["description"] = call_with_fallback(
+                                parse_keys(gemini_key), describe_scene, scene["thumbnail"],
+                                quota_errors=(SceneQuotaError,),
+                            )
                         except SceneQuotaError:
                             scene["description"] = None
                             quota_hit = True
@@ -673,8 +683,10 @@ with tab3:
                 else:
                     with st.spinner("대본 작성 중..."):
                         try:
-                            st.session_state.script_text_area = generate_script(
-                                gemini_key, product_info, style_choice, target_len
+                            st.session_state.script_text_area = call_with_fallback(
+                                parse_keys(gemini_key), generate_script,
+                                product_info, style_choice, target_len,
+                                quota_errors=(AnalyzerQuotaError,),
                             )
                         except AnalyzerQuotaError:
                             st.warning("⚠️ Gemini 무료 API 일일 한도를 초과했어요. 잠시 후 다시 시도해주세요.")
@@ -702,7 +714,11 @@ with tab3:
             else:
                 with st.spinner("장면 매칭 중..."):
                     try:
-                        matches = match_script_to_scenes(gemini_key, script_lines, st.session_state.scene_library)
+                        matches = call_with_fallback(
+                            parse_keys(gemini_key), match_script_to_scenes,
+                            script_lines, st.session_state.scene_library,
+                            quota_errors=(SceneQuotaError,),
+                        )
                         st.session_state.script_matching = {"lines": script_lines, "matches": matches}
                     except SceneQuotaError:
                         st.warning("⚠️ Gemini 무료 API 일일 한도를 초과했어요. 잠시 후 다시 시도해주세요.")
