@@ -47,13 +47,13 @@ ANALYSIS_PROMPT_TEMPLATE = """당신은 쇼핑 쇼츠 콘텐츠 분석 전문가
 
 [채널명]
 {channel}
-
+{hint_section}
 [자막 (형식: "분:초 텍스트", 자막이 없으면 "자막 없음"이라고 표시됨)]
 {transcript}
 
 다음 JSON 형식 그대로 답하세요 (키 이름을 정확히 지키세요):
 {{
-  "제품정보": "이 영상이 소개하는 제품/아이템에 대한 2~3문장 설명. 자막에 제품이 명확히 안 나오면 제목을 근거로 추정하고 문장 끝에 '(제목 기반 추정)'이라고 표시하세요.",
+  "제품정보": "이 영상이 소개하는 제품/아이템에 대한 2~3문장 설명. [실제 제품 정보]가 주어졌다면 그 내용을 우선 활용하고, 없고 자막에도 제품이 명확히 안 나오면 제목을 근거로 추정하고 문장 끝에 '(제목 기반 추정)'이라고 표시하세요.",
   "추천검색어": {{
     "한국어": ["이 제품을 한국 쇼핑몰(쿠팡 등)에서 찾을 때 쓸만한 한국어 검색 키워드 3~5개"],
     "중국어": ["같은 제품을 중국 쇼핑 플랫폼(타오바오, 샤오홍슈 등)에서 찾을 때 쓸만한 중국어(간체) 검색 키워드 3~5개"]
@@ -159,16 +159,24 @@ def _classify_and_reraise(e):
     raise
 
 
-def analyze_video(gemini_api_key, title, channel, transcript_segments, model=DEFAULT_MODEL):
+def analyze_video(gemini_api_key, title, channel, transcript_segments, product_hint=None, model=DEFAULT_MODEL):
     """
     영상 정보 + 자막을 Gemini에 보내 구조화된 분석 결과(dict)를 받는다.
     자막이 없으면 제목/채널명만으로 제한적인 분석을 시도한다.
+    product_hint: 자막이 없거나 부정확할 때, 사용자가 직접 알려주는 실제
+    제품 정보(예: "매립형 식기세척기"). 주어지면 프롬프트에 최우선 근거로 포함된다.
     """
     from google import genai
     from google.genai import types
 
     transcript_text = format_transcript_for_prompt(transcript_segments)
-    prompt = ANALYSIS_PROMPT_TEMPLATE.format(title=title, channel=channel, transcript=transcript_text)
+    hint_section = ""
+    if product_hint and product_hint.strip():
+        hint_section = f"\n[실제 제품 정보 - 사용자가 직접 확인한 내용, 반드시 우선 활용]\n{product_hint.strip()}\n"
+
+    prompt = ANALYSIS_PROMPT_TEMPLATE.format(
+        title=title, channel=channel, transcript=transcript_text, hint_section=hint_section
+    )
 
     client = genai.Client(api_key=gemini_api_key)
     try:

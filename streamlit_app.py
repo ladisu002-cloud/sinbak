@@ -99,7 +99,7 @@ def render_analysis(result):
     st.markdown(f"**📣 CTA**\n\n{result.get('cta', '-')}")
 
 
-def run_analysis(video_id, title, channel, gemini_key):
+def run_analysis(video_id, title, channel, gemini_key, product_hint=None):
     """영상 1개를 분석해서 세션 상태에 저장 (버튼 클릭 시 호출)."""
     if "analysis_results" not in st.session_state:
         st.session_state.analysis_results = {}
@@ -117,6 +117,7 @@ def run_analysis(video_id, title, channel, gemini_key):
             title=title,
             channel=channel,
             transcript_segments=segments,
+            product_hint=product_hint,
         )
         result["_had_transcript"] = segments is not None
         st.session_state.analysis_results[video_id] = result
@@ -156,13 +157,32 @@ def show_video_dialog(row, api_key, gemini_key):
         result = st.session_state.analysis_results.get(video_id)
 
         if result:
-            with st.container(height=420, border=False):
+            with st.container(height=380, border=False):
                 if "error" in result:
                     st.error(result["error"])
                 else:
                     if not result.get("_had_transcript", True):
-                        st.caption("⚠️ 자막을 가져오지 못해 제목 기반으로 추정한 분석이에요.")
+                        st.caption(
+                            "⚠️ 자막을 가져오지 못해 제목 기반으로 추정한 분석이에요. "
+                            "아래에 실제 제품 정보를 입력하고 다시 분석해보세요."
+                        )
                     render_analysis(result)
+
+            hint_key = f"hint_{video_id}"
+            hint_col1, hint_col2 = st.columns([3, 1])
+            hint_value = hint_col1.text_input(
+                "제품 힌트",
+                key=hint_key,
+                label_visibility="collapsed",
+                placeholder="예: 매립형 식기세척기, 코멧 브랜드 (영상 보고 실제 제품을 알려주면 더 정확해져요)",
+            )
+            if hint_col2.button("🔄 다시 분석", key=f"reanalyze_{video_id}", width="stretch"):
+                with st.spinner("힌트를 반영해서 다시 분석 중..."):
+                    run_analysis(
+                        video_id, row.get("제목", ""), row.get("채널명", ""),
+                        gemini_key, product_hint=hint_value,
+                    )
+                st.rerun()
 
             if "error" not in result:
                 st.divider()
