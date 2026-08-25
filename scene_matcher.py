@@ -57,7 +57,9 @@ def detect_scenes(video_path, threshold=27.0, min_scene_len_sec=0.6):
         return [(0.0, duration)]
 
     result = [(start.get_seconds(), end.get_seconds()) for start, end in scene_list]
-    return result[:MAX_SCENES_PER_VIDEO]
+    if len(result) > MAX_SCENES_PER_VIDEO:
+        result = sample_scenes_evenly(result, MAX_SCENES_PER_VIDEO)
+    return result
 
 
 def extract_thumbnail(video_path, at_sec):
@@ -76,12 +78,40 @@ def extract_thumbnail(video_path, at_sec):
         cap.release()
 
 
-def build_scene_library(video_path, video_name, threshold=27.0, min_scene_len_sec=0.6):
+def sample_scenes_evenly(scenes, max_count):
+    """
+    감지된 장면(start,end) 리스트가 max_count보다 많으면, 앞에서부터
+    자르는 대신 전체 구간에 고르게 퍼진 장면들을 골라 반환한다.
+    (영상 뒷부분이 통째로 버려지는 것을 방지)
+    """
+    if max_count <= 0:
+        return []
+    if len(scenes) <= max_count:
+        return list(scenes)
+    if max_count == 1:
+        return [scenes[0]]
+
+    indices = [round(i * (len(scenes) - 1) / (max_count - 1)) for i in range(max_count)]
+    seen = set()
+    result = []
+    for idx in indices:
+        if idx not in seen:
+            seen.add(idx)
+            result.append(scenes[idx])
+    return result
+
+
+def build_scene_library(video_path, video_name, threshold=27.0, min_scene_len_sec=0.6, max_scenes=None):
     """
     영상 1개 -> 장면 리스트(썸네일 포함, 설명은 아직 없음).
     각 항목: {scene_id, video_name, start_sec, end_sec, thumbnail(bytes)}
+    max_scenes가 주어지고 감지된 장면이 그보다 많으면, 영상 전체 구간에
+    고르게 분포된 장면들만 골라서 라이브러리를 만든다 (앞부분에 몰리지 않게).
     """
     scenes = detect_scenes(video_path, threshold=threshold, min_scene_len_sec=min_scene_len_sec)
+    if max_scenes is not None:
+        scenes = sample_scenes_evenly(scenes, max_scenes)
+
     library = []
     for i, (start, end) in enumerate(scenes):
         mid = start + (end - start) / 2

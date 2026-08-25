@@ -573,6 +573,10 @@ with tab3:
         st.warning(f"{MAX_UPLOAD_VIDEOS}개까지만 처리합니다. 나머지는 무시돼요.")
         uploaded_videos = uploaded_videos[:MAX_UPLOAD_VIDEOS]
 
+    force_reanalyze = st.checkbox(
+        "이미 분석한 영상도 새로 분석하기 (설정을 바꿨거나 다시 시도하고 싶을 때 체크)"
+    )
+
     analyze_scenes_clicked = st.button(
         "🎬 장면 분석 시작", type="primary", disabled=not uploaded_videos or not gemini_key
     )
@@ -581,12 +585,21 @@ with tab3:
         if st.session_state.scene_temp_dir is None:
             st.session_state.scene_temp_dir = tempfile.mkdtemp(prefix="scene_matcher_")
 
-        new_videos = [
-            v for v in uploaded_videos if v.name not in st.session_state.scene_processed_names
-        ]
+        if force_reanalyze:
+            new_videos = uploaded_videos
+            reanalyze_names = {v.name for v in uploaded_videos}
+            # 다시 분석하는 영상은 기존 장면 라이브러리에서 이전 결과를 먼저 제거
+            st.session_state.scene_library = [
+                s for s in st.session_state.scene_library if s["video_name"] not in reanalyze_names
+            ]
+            st.session_state.scene_processed_names -= reanalyze_names
+        else:
+            new_videos = [
+                v for v in uploaded_videos if v.name not in st.session_state.scene_processed_names
+            ]
 
         if not new_videos:
-            st.info("이미 처리한 영상들이에요. 새 영상을 올려주세요.")
+            st.info("이미 처리한 영상들이에요. 새로 분석하려면 위 체크박스를 켜주세요.")
         else:
             progress = st.progress(0.0, text="시작 중...")
             total_steps = len(new_videos) * 2  # 장면분할 1 + 설명생성 1 (개략적 진행률용)
@@ -602,8 +615,8 @@ with tab3:
                     scenes = build_scene_library(
                         video_path, video_file.name,
                         threshold=float(scene_sensitivity),
+                        max_scenes=max_scenes_per_video,
                     )
-                    scenes = scenes[:max_scenes_per_video]
                 except Exception as e:
                     st.error(f"{video_file.name} 장면 분할 실패: {e}")
                     continue
