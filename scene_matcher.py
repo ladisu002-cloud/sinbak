@@ -78,6 +78,50 @@ def extract_thumbnail(video_path, at_sec):
         cap.release()
 
 
+def extract_frames_for_range(video_path, start_sec, end_sec, count=3):
+    """
+    구간(start_sec~end_sec) 안에서 시간 순서대로 count장의 프레임을 뽑는다.
+    구간 맨 처음/끝은 장면 전환 아티팩트가 섞일 수 있어 살짝 안쪽에서 뽑는다.
+    짧은 사건(예: 잠깐 스쳐 지나가는 동작)도 놓치지 않도록, 대표 프레임
+    한 장 대신 이 함수로 뽑은 여러 장을 describe_scene에 같이 넘긴다.
+    """
+    duration = end_sec - start_sec
+    if duration <= 0:
+        return []
+    if count <= 1:
+        frame = extract_thumbnail(video_path, start_sec + duration / 2)
+        return [frame] if frame else []
+
+    margin = duration * 0.1
+    usable = max(duration - 2 * margin, 0)
+    frames = []
+    for i in range(count):
+        t = start_sec + margin + usable * i / (count - 1)
+        frame = extract_thumbnail(video_path, t)
+        if frame:
+            frames.append(frame)
+    return frames
+
+
+def get_video_duration(video_path):
+    """영상 전체 길이(초)를 반환."""
+    video = open_video(video_path)
+    return video.duration.get_seconds()
+
+
+def split_evenly_by_time(video_path, count):
+    """
+    컷이 거의 없는(롱테이크) 영상을 위한 대체 방식.
+    내용 기반 장면 감지 대신, 영상을 시간 기준으로 count개 구간으로
+    균등하게 나눠서 [(start_sec, end_sec), ...] 리스트를 반환한다.
+    """
+    duration = get_video_duration(video_path)
+    if count <= 0 or duration <= 0:
+        return [(0.0, duration)]
+    step = duration / count
+    return [(round(i * step, 2), round((i + 1) * step, 2)) for i in range(count)]
+
+
 def sample_scenes_evenly(scenes, max_count):
     """
     감지된 장면(start,end) 리스트가 max_count보다 많으면, 앞에서부터
@@ -105,17 +149,29 @@ def build_scene_library(video_path, video_name, threshold=27.0, min_scene_len_se
     """
     영상 1개 -> 장면 리스트(썸네일 포함, 설명은 아직 없음).
     각 항목: {scene_id, video_name, start_sec, end_sec, thumbnail(bytes)}
-    max_scenes가 주어지고 감지된 장면이 그보다 많으면, 영상 전체 구간에
-    고르게 분포된 장면들만 골라서 라이브러리를 만든다 (앞부분에 몰리지 않게).
+
+    max_scenes가 주어졌을 때:
+    - 감지된 장면이 max_scenes보다 많으면 -> 전체 구간에 고르게 분포된
+      장면들만 골라서 씀 (앞부분에 몰리지 않게)
+    - 감지된 장면이 max_scenes보다 적으면(컷이 거의 없는 롱테이크 영상) ->
+      내용 기반 감지 대신 시간 기준으로 max_scenes개 구간을 균등하게
+      나눠서 씀. 이렇게 해야 영상마다 컷이 얼마나 있든 상관없이 항상
+      비슷한 개수의 장면을 뽑아낼 수 있다.
     """
     scenes = detect_scenes(video_path, threshold=threshold, min_scene_len_sec=min_scene_len_sec)
     if max_scenes is not None:
-        scenes = sample_scenes_evenly(scenes, max_scenes)
+        if len(scenes) < max_scenes:
+            scenes = split_evenly_by_time(video_path, max_scenes)
+        else:
+            scenes = sample_scenes_evenly(scenes, max_scenes)
 
     library = []
     for i, (start, end) in enumerate(scenes):
         mid = start + (end - start) / 2
-        thumb = extract_thumbnail(video_path, mid)
+        thumb = extract_thumbnail(video_path, mid)  # 화면 표시용 대표 썸네일
+        ai_frames = extract_frames_for_range(video_path, start, end, count=3)  # AI 분석용 여러 프레임
+        if not ai_frames and thumb:
+            ai_frames = [thumb]
         library.append({
             "scene_id": f"{video_name}#{i}",
             "video_name": video_name,
@@ -124,6 +180,7 @@ def build_scene_library(video_path, video_name, threshold=27.0, min_scene_len_se
             "start_sec": round(start, 2),
             "end_sec": round(end, 2),
             "thumbnail": thumb,
+            "ai_frames": ai_frames,
             "description": None,
         })
     return library
@@ -161,21 +218,41 @@ def _classify_and_reraise(e):
     raise
 
 
-def describe_scene(gemini_api_key, thumbnail_bytes, model=DEFAULT_MODEL):
-    """장면 썸네일 이미지 -> AI가 2~6단어 정도의 짧은 한국어 설명 생성."""
+def describe_scene(gemini_api_key, frames, model=DEFAULT_MODEL):
+    """
+    장면 구간의 프레임(들) -> AI가 2~6단어 정도의 짧은 한국어 설명 생성.
+    frames: 같은 장면 구간 안에서 시간순으로 뽑은 프레임 bytes의 리스트.
+    (하위 호환: bytes 하나만 넘겨도 동작한다.)
+    여러 장을 같이 보여주는 이유는, 구간이 길면 정중앙 프레임 한 장만으로는
+    구간 중간에 잠깐 스쳐가는 동작(예: 야채 씻는 장면)을 놓칠 수 있어서다.
+    """
     from google import genai
     from google.genai import types
+
+    if isinstance(frames, (bytes, bytearray)):
+        frames = [frames]
+    frames = [f for f in frames if f]
+    if not frames:
+        raise ValueError("설명을 생성할 이미지가 없습니다.")
+
+    image_parts = [types.Part.from_bytes(data=f, mime_type="image/jpeg") for f in frames]
+    instruction = (
+        "이 이미지들은 같은 쇼츠 영상 한 구간 안에서 시간 순서대로 뽑은 프레임들이야. "
+        if len(frames) > 1 else
+        "이 쇼츠 영상의 한 장면이야. "
+    )
+    instruction += (
+        "이 구간에서 뭘 보여주고 있는지 2~6단어의 짧은 한국어 구절로만 답해. "
+        "여러 동작이 섞여 있다면 가장 특징적인 동작 위주로 답해. "
+        "예: '제품 언박싱 시연', '야채 씻는 시연', '사용 전후 비교'. "
+        "다른 설명 없이 구절만 출력해."
+    )
 
     client = genai.Client(api_key=gemini_api_key)
     try:
         response = client.models.generate_content(
             model=model,
-            contents=[
-                types.Part.from_bytes(data=thumbnail_bytes, mime_type="image/jpeg"),
-                "이 쇼츠 영상의 한 장면이야. 이 장면에서 뭘 보여주고 있는지 "
-                "2~6단어의 짧은 한국어 구절로만 답해. 예: '제품 언박싱 시연', "
-                "'제품 클로즈업', '사용 전후 비교'. 다른 설명 없이 구절만 출력해.",
-            ],
+            contents=image_parts + [instruction],
         )
     except Exception as e:
         _classify_and_reraise(e)

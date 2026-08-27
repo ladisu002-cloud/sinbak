@@ -632,10 +632,11 @@ with tab3:
                         done_steps / total_steps,
                         text=f"{video_file.name} - 장면 설명 생성 중 ({i+1}/{len(scenes)})",
                     )
-                    if scene["thumbnail"]:
+                    if scene.get("ai_frames") or scene["thumbnail"]:
                         try:
                             scene["description"] = call_with_fallback(
-                                parse_keys(gemini_key), describe_scene, scene["thumbnail"],
+                                parse_keys(gemini_key), describe_scene,
+                                scene.get("ai_frames") or scene["thumbnail"],
                                 quota_errors=(SceneQuotaError,),
                             )
                         except SceneQuotaError:
