@@ -1,7 +1,4 @@
-google-api-python-client>=2.100.0
-streamlit>=1.38.0
-pandas>=2.0.0
-youtube-transcript-api>=1.0.0
-google-genai>=1.0.0
-opencv-python-headless>=4.9.0
-scenedetect>=0.6.4
+streamlit>=1.38
+google-genai>=1.0
+python-dotenv>=1.0
+requests>=2.31
